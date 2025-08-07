@@ -1,0 +1,65 @@
+# Contract MCP Server Configuration File
+# This file configures networks, security settings, and server behavior
+
+# Default network to use when none is specified
+default_network = "ethereum"
+
+# Network configurations
+[networks.ethereum]
+rpc_url = "https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY_HERE"
+chain_id = 1
+explorer_url = "https://etherscan.io"
+
+[networks.ethereum.gas]
+default_gas_limit = 100000
+max_gas_price = 50_000_000_000  # 50 Gwei
+priority_fee = 2_000_000_000    # 2 Gwei
+
+[networks.sepolia]
+rpc_url = "https://eth-sepolia.g.alchemy.com/v2/YOUR_API_KEY_HERE"
+chain_id = 11155111
+explorer_url = "https://sepolia.etherscan.io"
+
+[networks.sepolia.gas]
+default_gas_limit = 100000
+max_gas_price = 20_000_000_000  # 20 Gwei
+priority_fee = 1_000_000_000    # 1 Gwei
+
+[networks.polygon]
+rpc_url = "https://polygon-mainnet.g.alchemy.com/v2/YOUR_API_KEY_HERE"
+chain_id = 137
+explorer_url = "https://polygonscan.com"
+
+[networks.polygon.gas]
+default_gas_limit = 100000
+max_gas_price = 500_000_000_000  # 500 Gwei
+priority_fee = 30_000_000_000    # 30 Gwei
+
+[networks.arbitrum]
+rpc_url = "https://arb-mainnet.g.alchemy.com/v2/YOUR_API_KEY_HERE"
+chain_id = 42161
+explorer_url = "https://arbiscan.io"
+
+[networks.arbitrum.gas]
+default_gas_limit = 100000
+max_gas_price = 5_000_000_000   # 5 Gwei
+priority_fee = 100_000_000      # 0.1 Gwei
+
+# Security settings
+[security]
+allow_write_operations = false
+require_confirmation = true
+# max_transaction_value = "1000000000000000000"  # 1 ETH in wei
+
+# Server configuration
+[server]
+transport = "stdio"
+
+[server.stdio]
+buffer_size = 1048576  # 1MB
+
+# Environment variables that can be used:
+# ETHERSCAN_API_KEY - Your Etherscan API key for ABI resolution
+# ALCHEMY_API_KEY - Your Alchemy API key (replace YOUR_API_KEY_HERE above)
+# INFURA_API_KEY - Your Infura API key (alternative to Alchemy)
+

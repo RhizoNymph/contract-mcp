@@ -1,0 +1,551 @@
+use alloy::{
+    dyn_abi::{DynSolValue, FunctionExt, JsonAbiExt, Word},
+    primitives::{Address, Bytes, U256},
+    providers::Provider,
+    rpc::types::{Filter, TransactionRequest},
+};
+use anyhow::{anyhow, Result};
+use serde_json::Value;
+use std::str::FromStr;
+
+use super::{CallResult, ContractInfo, EventInfo, FunctionCall, TransactionInfo};
+use crate::ethereum::{abi::AbiResolver, provider::ProviderManager};
+
+#[derive(Debug)]
+pub struct ContractManager {
+    provider_manager: ProviderManager,
+    abi_resolver: AbiResolver,
+}
+
+impl ContractManager {
+    pub fn new(provider_manager: ProviderManager) -> Self {
+        use crate::ethereum::abi::AbiSource;
+        let abi_resolver = AbiResolver::new(AbiSource::default());
+        Self { 
+            provider_manager,
+            abi_resolver,
+        }
+    }
+
+    pub async fn get_contract_info(
+        &mut self,
+        address: &str,
+        network: Option<&str>,
+    ) -> Result<ContractInfo> {
+        let provider = self.provider_manager.get_provider(network)?;
+        let contract_address = Address::from_str(address)?;
+
+        let bytecode = provider.get_code_at(contract_address).await?;
+
+        // Try to get ABI from Etherscan
+        let (abi_value, verified) = match self.abi_resolver.get_abi(address, network).await {
+            Ok(abi) => {
+                let abi_value = serde_json::to_value(&abi)
+                    .unwrap_or_else(|_| serde_json::json!([]));
+                (abi_value, true)
+            }
+            Err(e) => {
+                tracing::debug!("Could not fetch ABI for {}: {}", address, e);
+                (serde_json::json!([]), false)
+            }
+        };
+
+        let info = ContractInfo {
+            address: address.to_string(),
+            name: None, // Could be extracted from ABI or contract name resolution
+            abi: abi_value,
+            bytecode: if bytecode.is_empty() {
+                None
+            } else {
+                Some(format!("0x{}", hex::encode(&bytecode)))
+            },
+            deployment_block: None, // Would need to search for contract creation
+            creator: None,          // Would need creation transaction analysis
+            verified,
+        };
+
+        Ok(info)
+    }
+
+    pub async fn call_view_function(
+        &mut self,
+        contract_address: &str,
+        function_call: &FunctionCall,
+        network: Option<&str>,
+    ) -> Result<CallResult> {
+        let provider = self.provider_manager.get_provider(network)?;
+        let address = Address::from_str(contract_address)?;
+
+        // Get the ABI for the contract
+        let abi = match self.abi_resolver.get_abi(contract_address, network).await {
+            Ok(abi) => abi,
+            Err(e) => {
+                return Ok(CallResult {
+                    success: false,
+                    result: None,
+                    error: Some(format!("Could not resolve ABI: {}", e)),
+                    gas_used: None,
+                    transaction_hash: None,
+                });
+            }
+        };
+
+        // Find the function in the ABI
+        let function = abi
+            .functions()
+            .find(|f| f.name == function_call.function_name)
+            .ok_or_else(|| anyhow!("Function '{}' not found in ABI", function_call.function_name))?;
+
+        // Encode the function call
+        let calldata = match self.encode_function_call(function, &function_call.parameters) {
+            Ok(data) => data,
+            Err(e) => {
+                return Ok(CallResult {
+                    success: false,
+                    result: None,
+                    error: Some(format!("Failed to encode function call: {}", e)),
+                    gas_used: None,
+                    transaction_hash: None,
+                });
+            }
+        };
+
+        // Make the eth_call
+        let call_request = TransactionRequest::default()
+            .to(address)
+            .input(calldata.into());
+
+        match provider.call(&call_request).await {
+            Ok(result_bytes) => {
+                // Decode the result
+                match self.decode_function_result(function, &result_bytes) {
+                    Ok(decoded) => Ok(CallResult {
+                        success: true,
+                        result: Some(decoded),
+                        error: None,
+                        gas_used: None,
+                        transaction_hash: None,
+                    }),
+                    Err(e) => Ok(CallResult {
+                        success: false,
+                        result: Some(serde_json::json!({
+                            "raw_result": format!("0x{}", hex::encode(&result_bytes)),
+                            "decode_error": e.to_string()
+                        })),
+                        error: Some(format!("Failed to decode result: {}", e)),
+                        gas_used: None,
+                        transaction_hash: None,
+                    }),
+                }
+            }
+            Err(e) => Ok(CallResult {
+                success: false,
+                result: None,
+                error: Some(format!("eth_call failed: {}", e)),
+                gas_used: None,
+                transaction_hash: None,
+            }),
+        }
+    }
+
+    /// Encode function parameters for a contract call
+    fn encode_function_call(
+        &self,
+        function: &alloy::json_abi::Function,
+        parameters: &Value,
+    ) -> Result<Bytes> {
+        // Convert JSON parameters to DynSolValue
+        let inputs = match parameters {
+            Value::Array(params) => {
+                if params.len() != function.inputs.len() {
+                    return Err(anyhow!(
+                        "Parameter count mismatch: expected {}, got {}",
+                        function.inputs.len(),
+                        params.len()
+                    ));
+                }
+
+                let mut dyn_values = Vec::new();
+                for (i, param_value) in params.iter().enumerate() {
+                    let expected_type = &function.inputs[i].ty;
+                    let dyn_value = self.json_to_dyn_sol_value(param_value, expected_type)?;
+                    dyn_values.push(dyn_value);
+                }
+                dyn_values
+            }
+            Value::Object(obj) => {
+                // Named parameters
+                let mut dyn_values = Vec::new();
+                for input in &function.inputs {
+                    let param_value = obj
+                        .get(&input.name)
+                        .ok_or_else(|| anyhow!("Missing parameter: {}", input.name))?;
+                    let dyn_value = self.json_to_dyn_sol_value(param_value, &input.ty)?;
+                    dyn_values.push(dyn_value);
+                }
+                dyn_values
+            }
+            _ => return Err(anyhow!("Parameters must be an array or object")),
+        };
+
+        // Encode the function call
+        let encoded = function.abi_encode_input(&inputs)
+            .map_err(|e| anyhow!("Failed to encode function inputs: {}", e))?;
+
+        Ok(encoded.into())
+    }
+
+    /// Decode function call result
+    fn decode_function_result(
+        &self,
+        function: &alloy::json_abi::Function,
+        result_bytes: &Bytes,
+    ) -> Result<Value> {
+        if result_bytes.is_empty() {
+            return Ok(Value::Null);
+        }
+
+        let decoded = function
+            .abi_decode_output(result_bytes, false)
+            .map_err(|e| anyhow!("Failed to decode output: {}", e))?;
+
+        // Convert DynSolValue to JSON
+        self.dyn_sol_values_to_json(&decoded)
+    }
+
+    /// Convert JSON value to DynSolValue based on expected Solidity type
+    fn json_to_dyn_sol_value(&self, value: &Value, sol_type: &str) -> Result<DynSolValue> {
+        match sol_type {
+            "address" => {
+                let addr_str = value.as_str()
+                    .ok_or_else(|| anyhow!("Address must be a string"))?;
+                let address = Address::from_str(addr_str)?;
+                Ok(DynSolValue::Address(address))
+            }
+            ty if ty.starts_with("uint") => {
+                let num = match value {
+                    Value::Number(n) => {
+                        if let Some(u) = n.as_u64() {
+                            U256::from(u)
+                        } else {
+                            return Err(anyhow!("Invalid uint value"));
+                        }
+                    }
+                    Value::String(s) => {
+                        U256::from_str_radix(s.trim_start_matches("0x"), 16)
+                            .or_else(|_| U256::from_str(s))
+                            .map_err(|_| anyhow!("Invalid uint string: {}", s))?
+                    }
+                    _ => return Err(anyhow!("Uint must be a number or string")),
+                };
+                Ok(DynSolValue::Uint(num, 256))
+            }
+            "string" => {
+                let s = value.as_str()
+                    .ok_or_else(|| anyhow!("String parameter must be a string"))?;
+                Ok(DynSolValue::String(s.to_string()))
+            }
+            "bool" => {
+                let b = value.as_bool()
+                    .ok_or_else(|| anyhow!("Bool parameter must be a boolean"))?;
+                Ok(DynSolValue::Bool(b))
+            }
+            ty if ty.starts_with("bytes") && ty != "bytes" => {
+                // Fixed bytes (e.g., bytes32)
+                let hex_str = value.as_str()
+                    .ok_or_else(|| anyhow!("Bytes must be a hex string"))?;
+                let bytes = hex::decode(hex_str.trim_start_matches("0x"))
+                    .map_err(|_| anyhow!("Invalid hex string: {}", hex_str))?;
+                
+                // Convert to Word (FixedBytes<32>) by padding or truncating
+                let mut word_bytes = [0u8; 32];
+                let len = bytes.len().min(32);
+                word_bytes[..len].copy_from_slice(&bytes[..len]);
+                let word = Word::from(word_bytes);
+                
+                Ok(DynSolValue::FixedBytes(word, len))
+            }
+            "bytes" => {
+                // Dynamic bytes
+                let hex_str = value.as_str()
+                    .ok_or_else(|| anyhow!("Bytes must be a hex string"))?;
+                let bytes = hex::decode(hex_str.trim_start_matches("0x"))
+                    .map_err(|_| anyhow!("Invalid hex string: {}", hex_str))?;
+                Ok(DynSolValue::Bytes(bytes))
+            }
+            ty if ty.ends_with("[]") => {
+                // Array type
+                let array = value.as_array()
+                    .ok_or_else(|| anyhow!("Array parameter must be an array"))?;
+                let element_type = &ty[..ty.len() - 2];
+                let mut dyn_array = Vec::new();
+                for element in array {
+                    dyn_array.push(self.json_to_dyn_sol_value(element, element_type)?);
+                }
+                Ok(DynSolValue::Array(dyn_array))
+            }
+            _ => Err(anyhow!("Unsupported Solidity type: {}", sol_type)),
+        }
+    }
+
+    /// Convert DynSolValue array to JSON
+    fn dyn_sol_values_to_json(&self, values: &[DynSolValue]) -> Result<Value> {
+        if values.len() == 1 {
+            // Single return value
+            self.dyn_sol_value_to_json(&values[0])
+        } else {
+            // Multiple return values - return as array
+            let mut result = Vec::new();
+            for value in values {
+                result.push(self.dyn_sol_value_to_json(value)?);
+            }
+            Ok(Value::Array(result))
+        }
+    }
+
+    /// Convert single DynSolValue to JSON
+    fn dyn_sol_value_to_json(&self, value: &DynSolValue) -> Result<Value> {
+        match value {
+            DynSolValue::Address(addr) => Ok(Value::String(format!("0x{:x}", addr))),
+            DynSolValue::Uint(num, _) => Ok(Value::String(num.to_string())),
+            DynSolValue::Int(num, _) => Ok(Value::String(num.to_string())),
+            DynSolValue::Bool(b) => Ok(Value::Bool(*b)),
+            DynSolValue::String(s) => Ok(Value::String(s.clone())),
+            DynSolValue::Bytes(bytes) => Ok(Value::String(format!("0x{}", hex::encode(bytes)))),
+            DynSolValue::FixedBytes(bytes, _) => Ok(Value::String(format!("0x{}", hex::encode(bytes)))),
+            DynSolValue::Array(arr) => {
+                let mut json_arr = Vec::new();
+                for item in arr {
+                    json_arr.push(self.dyn_sol_value_to_json(item)?);
+                }
+                Ok(Value::Array(json_arr))
+            }
+            DynSolValue::Tuple(tuple) => {
+                let mut json_arr = Vec::new();
+                for item in tuple {
+                    json_arr.push(self.dyn_sol_value_to_json(item)?);
+                }
+                Ok(Value::Array(json_arr))
+            }
+            _ => Err(anyhow!("Unsupported DynSolValue type: {:?}", value)),
+        }
+    }
+
+    pub async fn estimate_gas(
+        &mut self,
+        contract_address: &str,
+        function_call: &FunctionCall,
+        network: Option<&str>,
+    ) -> Result<u64> {
+        let provider = self.provider_manager.get_provider(network)?;
+        let address = Address::from_str(contract_address)?;
+
+        // If it's a simple ETH transfer (no function call), return base cost
+        if function_call.function_name.is_empty() {
+            return Ok(21000);
+        }
+
+        // Get the ABI and encode the function call
+        let abi = self.abi_resolver.get_abi(contract_address, network).await
+            .map_err(|e| anyhow!("Could not resolve ABI for gas estimation: {}", e))?;
+
+        let function = abi
+            .functions()
+            .find(|f| f.name == function_call.function_name)
+            .ok_or_else(|| anyhow!("Function '{}' not found in ABI", function_call.function_name))?;
+
+        let calldata = self.encode_function_call(function, &function_call.parameters)
+            .map_err(|e| anyhow!("Failed to encode function call for gas estimation: {}", e))?;
+
+        // Build transaction request for gas estimation
+        let mut tx_request = TransactionRequest::default()
+            .to(address)
+            .input(calldata.into());
+
+        // Set from address if provided
+        if let Some(from_str) = &function_call.from {
+            let from_address = Address::from_str(from_str)?;
+            tx_request = tx_request.from(from_address);
+        }
+
+        // Set value if provided
+        if let Some(value_str) = &function_call.value {
+            let value = if value_str.starts_with("0x") {
+                U256::from_str_radix(&value_str[2..], 16)?
+            } else {
+                U256::from_str(value_str)?
+            };
+            tx_request = tx_request.value(value);
+        }
+
+        // Estimate gas
+        let gas_estimate = provider.estimate_gas(&tx_request).await
+            .map_err(|e| anyhow!("Gas estimation failed: {}", e))?;
+
+        Ok(gas_estimate)
+    }
+
+    pub async fn get_contract_events(
+        &self,
+        contract_address: &str,
+        from_block: Option<u64>,
+        to_block: Option<u64>,
+        network: Option<&str>,
+    ) -> Result<Vec<EventInfo>> {
+        let provider = self.provider_manager.get_provider(network)?;
+        let address = Address::from_str(contract_address)?;
+
+        let filter = Filter::new()
+            .address(address)
+            .from_block(from_block.unwrap_or(0))
+            .to_block(to_block.unwrap_or(u64::MAX));
+
+        let logs = provider.get_logs(&filter).await?;
+
+        let events: Vec<EventInfo> = logs
+            .into_iter()
+            .enumerate()
+            .map(|(index, log)| EventInfo {
+                address: format!("0x{:x}", log.address()),
+                topics: log.topics().iter().map(|t| format!("0x{:x}", t)).collect(),
+                data: format!("0x{}", hex::encode(log.data().data.clone())),
+                block_number: log.block_number.unwrap_or_default(),
+                transaction_hash: format!("0x{:x}", log.transaction_hash.unwrap_or_default()),
+                log_index: index as u64,
+                decoded: None, // Would need ABI to decode
+            })
+            .collect();
+
+        Ok(events)
+    }
+
+    #[allow(dead_code)]
+    pub async fn get_transaction_history(
+        &self,
+        _contract_address: &str,
+        _limit: Option<usize>,
+        _network: Option<&str>,
+    ) -> Result<Vec<TransactionInfo>> {
+        // This would require indexing service integration
+        // For now, return empty list
+        Ok(vec![])
+    }
+
+    pub async fn simulate_transaction(
+        &mut self,
+        contract_address: &str,
+        function_call: &FunctionCall,
+        network: Option<&str>,
+    ) -> Result<CallResult> {
+        let provider = self.provider_manager.get_provider(network)?;
+        let address = Address::from_str(contract_address)?;
+
+        // Get the ABI and encode the function call
+        let abi = match self.abi_resolver.get_abi(contract_address, network).await {
+            Ok(abi) => abi,
+            Err(e) => {
+                return Ok(CallResult {
+                    success: false,
+                    result: None,
+                    error: Some(format!("Could not resolve ABI: {}", e)),
+                    gas_used: None,
+                    transaction_hash: None,
+                });
+            }
+        };
+
+        let function = abi
+            .functions()
+            .find(|f| f.name == function_call.function_name)
+            .ok_or_else(|| anyhow!("Function '{}' not found in ABI", function_call.function_name))?;
+
+        let calldata = match self.encode_function_call(function, &function_call.parameters) {
+            Ok(data) => data,
+            Err(e) => {
+                return Ok(CallResult {
+                    success: false,
+                    result: None,
+                    error: Some(format!("Failed to encode function call: {}", e)),
+                    gas_used: None,
+                    transaction_hash: None,
+                });
+            }
+        };
+
+        // Build transaction request for simulation
+        let mut tx_request = TransactionRequest::default()
+            .to(address)
+            .input(calldata.into());
+
+        // Set from address if provided
+        if let Some(from_str) = &function_call.from {
+            if let Ok(from_address) = Address::from_str(from_str) {
+                tx_request = tx_request.from(from_address);
+            }
+        }
+
+        // Set value if provided
+        if let Some(value_str) = &function_call.value {
+            if let Ok(value) = if value_str.starts_with("0x") {
+                U256::from_str_radix(&value_str[2..], 16)
+            } else {
+                U256::from_str(value_str)
+            } {
+                tx_request = tx_request.value(value);
+            }
+        }
+
+        // First, estimate gas for the transaction
+        let gas_estimate = match provider.estimate_gas(&tx_request).await {
+            Ok(gas) => Some(gas),
+            Err(e) => {
+                // If gas estimation fails, the transaction would likely fail
+                return Ok(CallResult {
+                    success: false,
+                    result: Some(serde_json::json!({
+                        "simulated": true,
+                        "gas_estimation_failed": true,
+                        "error": e.to_string()
+                    })),
+                    error: Some(format!("Gas estimation failed (transaction would likely revert): {}", e)),
+                    gas_used: None,
+                    transaction_hash: None,
+                });
+            }
+        };
+
+        // Simulate with eth_call
+        match provider.call(&tx_request).await {
+            Ok(result_bytes) => {
+                // Try to decode the result
+                let decoded_result = self.decode_function_result(function, &result_bytes)
+                    .unwrap_or_else(|_| serde_json::json!({
+                        "raw_result": format!("0x{}", hex::encode(&result_bytes))
+                    }));
+
+                Ok(CallResult {
+                    success: true,
+                    result: Some(serde_json::json!({
+                        "simulated": true,
+                        "result": decoded_result,
+                        "would_succeed": true
+                    })),
+                    error: None,
+                    gas_used: gas_estimate,
+                    transaction_hash: None,
+                })
+            }
+            Err(e) => Ok(CallResult {
+                success: false,
+                result: Some(serde_json::json!({
+                    "simulated": true,
+                    "would_succeed": false,
+                    "revert_reason": e.to_string()
+                })),
+                error: Some(format!("Transaction simulation failed: {}", e)),
+                gas_used: gas_estimate,
+                transaction_hash: None,
+            }),
+        }
+    }
+}
