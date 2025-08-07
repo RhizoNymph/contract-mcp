@@ -1,6 +1,7 @@
 pub mod abi;
 pub mod contract;
 pub mod provider;
+pub mod utils;
 
 use serde::{Deserialize, Serialize};
 

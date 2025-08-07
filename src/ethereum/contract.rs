@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::str::FromStr;
 
 use super::{CallResult, ContractInfo, EventInfo, FunctionCall, TransactionInfo};
-use crate::ethereum::{abi::AbiResolver, provider::ProviderManager};
+use crate::ethereum::{abi::AbiResolver, provider::ProviderManager, utils};
 
 #[derive(Debug)]
 pub struct ContractManager {
@@ -32,10 +32,31 @@ impl ContractManager {
         address: &str,
         network: Option<&str>,
     ) -> Result<ContractInfo> {
-        let provider = self.provider_manager.get_provider(network)?;
-        let contract_address = Address::from_str(address)?;
+        // Validate the contract address
+        let contract_address = utils::validate_address(address)
+            .map_err(|e| anyhow!("Invalid contract address: {}", e))?;
+        
+        // Validate network if provided
+        if let Some(net) = network {
+            let available_networks: Vec<String> = self.provider_manager.get_available_networks();
+            utils::validate_network(net, &available_networks)
+                .map_err(|e| anyhow!("Network validation failed: {}", e))?;
+        }
 
-        let bytecode = provider.get_code_at(contract_address).await?;
+        let provider = self.provider_manager.get_provider(network)
+            .map_err(|e| anyhow!("Failed to get provider for network '{}': {}", 
+                network.unwrap_or("default"), e))?;
+
+        let bytecode = provider.get_code_at(contract_address).await
+            .map_err(|e| anyhow!("Failed to fetch contract bytecode: {}", utils::interpret_rpc_error(&e.to_string())))?;
+
+        // Check if contract exists (has bytecode)
+        if bytecode.is_empty() {
+            return Err(anyhow!(
+                "No contract found at address '{}' on network '{}'. The address may be incorrect, or the contract may not be deployed yet.",
+                address, network.unwrap_or("default")
+            ));
+        }
 
         // Try to get ABI from Etherscan
         let (abi_value, verified) = match self.abi_resolver.get_abi(address, network).await {
@@ -45,13 +66,14 @@ impl ContractManager {
                 (abi_value, true)
             }
             Err(e) => {
-                tracing::debug!("Could not fetch ABI for {}: {}", address, e);
+                let friendly_error = utils::interpret_abi_error(&e.to_string(), address);
+                tracing::debug!("ABI resolution failed for {}: {}", address, friendly_error);
                 (serde_json::json!([]), false)
             }
         };
 
         let info = ContractInfo {
-            address: address.to_string(),
+            address: format!("{:?}", contract_address), // This gives us the checksummed address
             name: None, // Could be extracted from ABI or contract name resolution
             abi: abi_value,
             bytecode: if bytecode.is_empty() {
@@ -73,8 +95,21 @@ impl ContractManager {
         function_call: &FunctionCall,
         network: Option<&str>,
     ) -> Result<CallResult> {
-        let provider = self.provider_manager.get_provider(network)?;
-        let address = Address::from_str(contract_address)?;
+        // Validate inputs
+        let address = utils::validate_address(contract_address)
+            .map_err(|e| anyhow!("Invalid contract address: {}", e))?;
+
+        utils::validate_function_name(&function_call.function_name)
+            .map_err(|e| anyhow!("Invalid function name: {}", e))?;
+
+        if let Some(net) = network {
+            let available_networks = self.provider_manager.get_available_networks();
+            utils::validate_network(net, &available_networks)
+                .map_err(|e| anyhow!("Network validation failed: {}", e))?;
+        }
+
+        let provider = self.provider_manager.get_provider(network)
+            .map_err(|e| anyhow!("Failed to get provider: {}", e))?;
 
         // Get the ABI for the contract
         let abi = match self.abi_resolver.get_abi(contract_address, network).await {
@@ -83,7 +118,7 @@ impl ContractManager {
                 return Ok(CallResult {
                     success: false,
                     result: None,
-                    error: Some(format!("Could not resolve ABI: {}", e)),
+                    error: Some(utils::interpret_abi_error(&e.to_string(), contract_address)),
                     gas_used: None,
                     transaction_hash: None,
                 });
@@ -94,7 +129,22 @@ impl ContractManager {
         let function = abi
             .functions()
             .find(|f| f.name == function_call.function_name)
-            .ok_or_else(|| anyhow!("Function '{}' not found in ABI", function_call.function_name))?;
+            .ok_or_else(|| {
+                let available_functions: Vec<String> = abi
+                    .functions()
+                    .map(|f| f.name.clone())
+                    .collect();
+                
+                if available_functions.is_empty() {
+                    anyhow!("Function '{}' not found. The contract ABI contains no functions.", function_call.function_name)
+                } else {
+                    anyhow!(
+                        "Function '{}' not found in contract ABI. Available functions: {}",
+                        function_call.function_name,
+                        available_functions.join(", ")
+                    )
+                }
+            })?;
 
         // Encode the function call
         let calldata = match self.encode_function_call(function, &function_call.parameters) {
@@ -141,7 +191,7 @@ impl ContractManager {
             Err(e) => Ok(CallResult {
                 success: false,
                 result: None,
-                error: Some(format!("eth_call failed: {}", e)),
+                error: Some(utils::interpret_rpc_error(&e.to_string())),
                 gas_used: None,
                 transaction_hash: None,
             }),
@@ -158,17 +208,29 @@ impl ContractManager {
         let inputs = match parameters {
             Value::Array(params) => {
                 if params.len() != function.inputs.len() {
+                    let expected_params: Vec<String> = function.inputs
+                        .iter()
+                        .map(|input| format!("{} {}", input.ty, input.name))
+                        .collect();
+                    
                     return Err(anyhow!(
-                        "Parameter count mismatch: expected {}, got {}",
+                        "Parameter count mismatch for function '{}': expected {} parameters, got {}.\nExpected parameters: [{}]",
+                        function.name,
                         function.inputs.len(),
-                        params.len()
+                        params.len(),
+                        expected_params.join(", ")
                     ));
                 }
 
                 let mut dyn_values = Vec::new();
                 for (i, param_value) in params.iter().enumerate() {
                     let expected_type = &function.inputs[i].ty;
-                    let dyn_value = self.json_to_dyn_sol_value(param_value, expected_type)?;
+                    let param_name = &function.inputs[i].name;
+                    let dyn_value = self.json_to_dyn_sol_value(param_value, expected_type)
+                        .map_err(|e| anyhow!(
+                            "Invalid parameter #{} ('{}' of type '{}'): {}",
+                            i + 1, param_name, expected_type, e
+                        ))?;
                     dyn_values.push(dyn_value);
                 }
                 dyn_values
@@ -176,16 +238,39 @@ impl ContractManager {
             Value::Object(obj) => {
                 // Named parameters
                 let mut dyn_values = Vec::new();
+                let expected_params: Vec<String> = function.inputs
+                    .iter()
+                    .map(|input| format!("{}: {}", input.name, input.ty))
+                    .collect();
+                
                 for input in &function.inputs {
                     let param_value = obj
                         .get(&input.name)
-                        .ok_or_else(|| anyhow!("Missing parameter: {}", input.name))?;
-                    let dyn_value = self.json_to_dyn_sol_value(param_value, &input.ty)?;
+                        .ok_or_else(|| anyhow!(
+                            "Missing required parameter '{}' of type '{}' for function '{}'.\nExpected parameters: {{{}}}",
+                            input.name, input.ty, function.name, expected_params.join(", ")
+                        ))?;
+                    let dyn_value = self.json_to_dyn_sol_value(param_value, &input.ty)
+                        .map_err(|e| anyhow!(
+                            "Invalid parameter '{}' of type '{}': {}",
+                            input.name, input.ty, e
+                        ))?;
                     dyn_values.push(dyn_value);
                 }
                 dyn_values
             }
-            _ => return Err(anyhow!("Parameters must be an array or object")),
+            _ => {
+                let expected_params: Vec<String> = function.inputs
+                    .iter()
+                    .map(|input| format!("{}: {}", input.name, input.ty))
+                    .collect();
+                return Err(anyhow!(
+                    "Invalid parameter format for function '{}'. Parameters must be provided as either:\n1. Array: [value1, value2, ...]\n2. Object: {{{}}}\nProvided: {}",
+                    function.name,
+                    expected_params.join(", "),
+                    serde_json::to_string(parameters).unwrap_or_else(|_| "invalid JSON".to_string())
+                ));
+            },
         };
 
         // Encode the function call
@@ -337,22 +422,42 @@ impl ContractManager {
         function_call: &FunctionCall,
         network: Option<&str>,
     ) -> Result<u64> {
-        let provider = self.provider_manager.get_provider(network)?;
-        let address = Address::from_str(contract_address)?;
+        // Validate inputs
+        let address = utils::validate_address(contract_address)
+            .map_err(|e| anyhow!("Invalid contract address for gas estimation: {}", e))?;
+
+        if let Some(net) = network {
+            let available_networks = self.provider_manager.get_available_networks();
+            utils::validate_network(net, &available_networks)
+                .map_err(|e| anyhow!("Network validation failed: {}", e))?;
+        }
+
+        let provider = self.provider_manager.get_provider(network)
+            .map_err(|e| anyhow!("Failed to get provider: {}", e))?;
 
         // If it's a simple ETH transfer (no function call), return base cost
         if function_call.function_name.is_empty() {
             return Ok(21000);
         }
 
+        utils::validate_function_name(&function_call.function_name)
+            .map_err(|e| anyhow!("Invalid function name: {}", e))?;
+
         // Get the ABI and encode the function call
         let abi = self.abi_resolver.get_abi(contract_address, network).await
-            .map_err(|e| anyhow!("Could not resolve ABI for gas estimation: {}", e))?;
+            .map_err(|e| anyhow!("Could not resolve ABI for gas estimation: {}", utils::interpret_abi_error(&e.to_string(), contract_address)))?;
 
         let function = abi
             .functions()
             .find(|f| f.name == function_call.function_name)
-            .ok_or_else(|| anyhow!("Function '{}' not found in ABI", function_call.function_name))?;
+            .ok_or_else(|| {
+                let available_functions: Vec<String> = abi
+                    .functions()
+                    .map(|f| f.name.clone())
+                    .collect();
+                anyhow!("Function '{}' not found in contract ABI for gas estimation. Available functions: {}",
+                    function_call.function_name, available_functions.join(", "))
+            })?;
 
         let calldata = self.encode_function_call(function, &function_call.parameters)
             .map_err(|e| anyhow!("Failed to encode function call for gas estimation: {}", e))?;
@@ -364,23 +469,21 @@ impl ContractManager {
 
         // Set from address if provided
         if let Some(from_str) = &function_call.from {
-            let from_address = Address::from_str(from_str)?;
+            let from_address = utils::validate_address(from_str)
+                .map_err(|e| anyhow!("Invalid 'from' address: {}", e))?;
             tx_request = tx_request.from(from_address);
         }
 
         // Set value if provided
         if let Some(value_str) = &function_call.value {
-            let value = if value_str.starts_with("0x") {
-                U256::from_str_radix(&value_str[2..], 16)?
-            } else {
-                U256::from_str(value_str)?
-            };
+            let value = utils::validate_hex_value(value_str)
+                .map_err(|e| anyhow!("Invalid transaction value: {}", e))?;
             tx_request = tx_request.value(value);
         }
 
         // Estimate gas
         let gas_estimate = provider.estimate_gas(&tx_request).await
-            .map_err(|e| anyhow!("Gas estimation failed: {}", e))?;
+            .map_err(|e| anyhow!("Gas estimation failed: {}", utils::interpret_rpc_error(&e.to_string())))?;
 
         Ok(gas_estimate)
     }
@@ -437,8 +540,21 @@ impl ContractManager {
         function_call: &FunctionCall,
         network: Option<&str>,
     ) -> Result<CallResult> {
-        let provider = self.provider_manager.get_provider(network)?;
-        let address = Address::from_str(contract_address)?;
+        // Validate inputs
+        let address = utils::validate_address(contract_address)
+            .map_err(|e| anyhow!("Invalid contract address for simulation: {}", e))?;
+
+        utils::validate_function_name(&function_call.function_name)
+            .map_err(|e| anyhow!("Invalid function name: {}", e))?;
+
+        if let Some(net) = network {
+            let available_networks = self.provider_manager.get_available_networks();
+            utils::validate_network(net, &available_networks)
+                .map_err(|e| anyhow!("Network validation failed: {}", e))?;
+        }
+
+        let provider = self.provider_manager.get_provider(network)
+            .map_err(|e| anyhow!("Failed to get provider: {}", e))?;
 
         // Get the ABI and encode the function call
         let abi = match self.abi_resolver.get_abi(contract_address, network).await {
@@ -447,7 +563,7 @@ impl ContractManager {
                 return Ok(CallResult {
                     success: false,
                     result: None,
-                    error: Some(format!("Could not resolve ABI: {}", e)),
+                    error: Some(utils::interpret_abi_error(&e.to_string(), contract_address)),
                     gas_used: None,
                     transaction_hash: None,
                 });
@@ -457,7 +573,14 @@ impl ContractManager {
         let function = abi
             .functions()
             .find(|f| f.name == function_call.function_name)
-            .ok_or_else(|| anyhow!("Function '{}' not found in ABI", function_call.function_name))?;
+            .ok_or_else(|| {
+                let available_functions: Vec<String> = abi
+                    .functions()
+                    .map(|f| f.name.clone())
+                    .collect();
+                anyhow!("Function '{}' not found in contract ABI for simulation. Available functions: {}",
+                    function_call.function_name, available_functions.join(", "))
+            })?;
 
         let calldata = match self.encode_function_call(function, &function_call.parameters) {
             Ok(data) => data,
@@ -479,19 +602,37 @@ impl ContractManager {
 
         // Set from address if provided
         if let Some(from_str) = &function_call.from {
-            if let Ok(from_address) = Address::from_str(from_str) {
-                tx_request = tx_request.from(from_address);
+            match utils::validate_address(from_str) {
+                Ok(from_address) => {
+                    tx_request = tx_request.from(from_address);
+                }
+                Err(e) => {
+                    return Ok(CallResult {
+                        success: false,
+                        result: None,
+                        error: Some(format!("Invalid 'from' address for simulation: {}", e)),
+                        gas_used: None,
+                        transaction_hash: None,
+                    });
+                }
             }
         }
 
         // Set value if provided
         if let Some(value_str) = &function_call.value {
-            if let Ok(value) = if value_str.starts_with("0x") {
-                U256::from_str_radix(&value_str[2..], 16)
-            } else {
-                U256::from_str(value_str)
-            } {
-                tx_request = tx_request.value(value);
+            match utils::validate_hex_value(value_str) {
+                Ok(value) => {
+                    tx_request = tx_request.value(value);
+                }
+                Err(e) => {
+                    return Ok(CallResult {
+                        success: false,
+                        result: None,
+                        error: Some(format!("Invalid transaction value for simulation: {}", e)),
+                        gas_used: None,
+                        transaction_hash: None,
+                    });
+                }
             }
         }
 
@@ -500,14 +641,15 @@ impl ContractManager {
             Ok(gas) => Some(gas),
             Err(e) => {
                 // If gas estimation fails, the transaction would likely fail
+                let friendly_error = utils::interpret_rpc_error(&e.to_string());
                 return Ok(CallResult {
                     success: false,
                     result: Some(serde_json::json!({
                         "simulated": true,
                         "gas_estimation_failed": true,
-                        "error": e.to_string()
+                        "error": friendly_error
                     })),
-                    error: Some(format!("Gas estimation failed (transaction would likely revert): {}", e)),
+                    error: Some(format!("Gas estimation failed (transaction would likely revert): {}", friendly_error)),
                     gas_used: None,
                     transaction_hash: None,
                 });
@@ -535,17 +677,20 @@ impl ContractManager {
                     transaction_hash: None,
                 })
             }
-            Err(e) => Ok(CallResult {
-                success: false,
-                result: Some(serde_json::json!({
-                    "simulated": true,
-                    "would_succeed": false,
-                    "revert_reason": e.to_string()
-                })),
-                error: Some(format!("Transaction simulation failed: {}", e)),
-                gas_used: gas_estimate,
-                transaction_hash: None,
-            }),
+            Err(e) => {
+                let friendly_error = utils::interpret_rpc_error(&e.to_string());
+                Ok(CallResult {
+                    success: false,
+                    result: Some(serde_json::json!({
+                        "simulated": true,
+                        "would_succeed": false,
+                        "revert_reason": friendly_error
+                    })),
+                    error: Some(format!("Transaction simulation failed: {}", friendly_error)),
+                    gas_used: gas_estimate,
+                    transaction_hash: None,
+                })
+            }
         }
     }
 }

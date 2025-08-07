@@ -50,13 +50,40 @@ impl ProviderManager {
     pub fn list_networks(&self) -> Vec<&String> {
         self.config.networks.keys().collect()
     }
+    
+    pub fn get_available_networks(&self) -> Vec<String> {
+        self.config.networks.keys().cloned().collect()
+    }
 
-    #[allow(dead_code)]
     pub async fn check_connection(&self, network: Option<&str>) -> Result<bool> {
-        let provider = self.get_provider(network)?;
+        let provider = self.get_provider(network)
+            .map_err(|e| anyhow!("Failed to get provider for connection check: {}", e))?;
+        
         match provider.get_block_number().await {
             Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+            Err(e) => {
+                tracing::debug!("Connection check failed for network {}: {}", 
+                    network.unwrap_or("default"), e);
+                Ok(false)
+            }
+        }
+    }
+    
+    /// Validates network connectivity with detailed error information
+    pub async fn validate_network_connection(&self, network: Option<&str>) -> Result<()> {
+        let network_name = network.unwrap_or(&self.config.default_network);
+        let provider = self.get_provider(network)
+            .map_err(|e| anyhow!("Network '{}' is not configured: {}", network_name, e))?;
+        
+        match provider.get_block_number().await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                Err(anyhow!(
+                    "Cannot connect to network '{}': {}. Please check your RPC endpoint configuration and network connectivity.",
+                    network_name,
+                    crate::ethereum::utils::interpret_rpc_error(&e.to_string())
+                ))
+            }
         }
     }
 
