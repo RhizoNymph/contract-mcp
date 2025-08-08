@@ -211,3 +211,63 @@ NEVER proactively create documentation files (*.md) or README files. Only create
 - ✅ **Comprehensive error handling and revert detection**
 - ✅ **Local ABI caching for performance**
 - ✅ **Multi-network support (Ethereum, Sepolia, etc.)**
+
+## 🧪 Current Development Status (December 2024)
+
+### Write Operations Implementation Status
+
+**✅ Infrastructure Complete:**
+- `send_transaction` tool fully implemented with Alloy wallet integration
+- Private key parsing and transaction signing functionality working
+- Security controls: write operations properly gated behind `--allow-writes` flag
+- Transaction building, gas estimation, and receipt handling implemented
+- Comprehensive input validation for addresses, private keys, and parameters
+
+**✅ Tested Functionality:**
+```bash
+# Security test - properly blocks without --allow-writes
+echo '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "send_transaction", ...}}' | ./contract-mcp
+# Returns: "Error: Write operations are disabled. Use --allow-writes flag to enable transaction sending."
+
+# Private key test - successfully parses keys and derives addresses  
+./contract-mcp --allow-writes
+# Logs show: "Sending transaction from address: 0x1be31a94361a391bbafb2a4ccd704f57dc04d4bb"
+```
+
+**❌ Current Blocker: Network Connectivity**
+All external API calls are failing with "error sending request" errors affecting:
+- Etherscan API calls: `https://api.etherscan.io/api?module=contract&action=getabi&address=...&apikey=MZ2B8IMISDSH71EYCWTS7ZTYTZE9D4C8HJ`  
+- RPC endpoint calls to Alchemy/Infura
+- Both read operations (contract info, function calls) and write operations (transaction sending)
+
+### Environment Setup Required
+
+**API Keys Needed:**
+```bash
+export ALCHEMY_API_KEY="your_alchemy_api_key_here"
+export ETHERSCAN_API_KEY="your_etherscan_api_key_here"
+export PRIVATE_KEY="your_private_key_here"  # Optional: used as default for transactions
+```
+
+**Network/Firewall Requirements:**
+- Outbound HTTPS access to `api.etherscan.io` (port 443)
+- Outbound HTTPS access to `eth-mainnet.g.alchemy.com` (port 443)  
+- Outbound HTTPS access to `eth-sepolia.g.alchemy.com` (port 443)
+- TLS/SSL certificate validation enabled
+- No proxy or firewall blocking API requests
+
+**Testing Network Connectivity:**
+```bash
+# Test Etherscan API access
+curl "https://api.etherscan.io/api?module=contract&action=getabi&address=0xA0b86a33E6441E1Bb76a85d6e0d945C1E87e1c00&format=json&apikey=YOUR_ETHERSCAN_KEY"
+
+# Test Alchemy RPC access  
+curl -X POST -H "Content-Type: application/json" \
+  --data '{"method":"eth_blockNumber","params":[],"id":1,"jsonrpc":"2.0"}' \
+  "https://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY"
+```
+
+**Once network connectivity is resolved, the server should provide complete functionality:**
+- All 5 read-only tools (get_contract_info, call_view_function, estimate_gas, get_contract_events, simulate_transaction)
+- Full write operations (send_transaction with private key signing)
+- Multi-network support across Ethereum mainnet and testnets

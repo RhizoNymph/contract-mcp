@@ -70,7 +70,7 @@ struct SendTransactionRequest {
     contract_address: String,
     function_name: String,
     parameters: Value,
-    private_key: String,
+    private_key: Option<String>,
     value: Option<String>,
     gas_limit: Option<u64>,
     gas_price: Option<String>,
@@ -242,6 +242,25 @@ impl ContractMcpServer {
             return format!("Error: Write operations are disabled. Use --allow-writes flag to enable transaction sending.");
         }
 
+        // Determine private key: use from request if provided, otherwise check environment variable
+        let private_key = match request.private_key {
+            Some(key) if !key.is_empty() => {
+                tracing::debug!("Using private key from request parameters");
+                key
+            }
+            _ => {
+                match std::env::var("PRIVATE_KEY") {
+                    Ok(env_key) => {
+                        tracing::info!("Using PRIVATE_KEY from environment variable");
+                        env_key
+                    }
+                    Err(_) => {
+                        return format!("Error: No private key provided. Either include 'private_key' in the request or set PRIVATE_KEY environment variable.");
+                    }
+                }
+            }
+        };
+
         let function_call = FunctionCall {
             function_name: request.function_name,
             parameters: request.parameters,
@@ -257,7 +276,7 @@ impl ContractMcpServer {
             .send_transaction(
                 &request.contract_address,
                 &function_call,
-                &request.private_key,
+                &private_key,
                 request.gas_limit,
                 request.gas_price.as_deref(),
                 request.network.as_deref(),

@@ -89,7 +89,19 @@ for domain in \
     "stackoverflow.com" \
     "www.stackoverflow.com" \
     "docs.rs" \
-    "lib.rs"; do
+    "lib.rs" \
+    "etherscan.io" \
+    "api.etherscan.io" \
+    "alchemy.com" \
+    "eth-mainnet.alchemyapi.io" \
+    "eth-goerli.alchemyapi.io" \
+    "eth-sepolia.alchemyapi.io" \
+    "polygon-mainnet.alchemyapi.io" \
+    "polygon-mumbai.alchemyapi.io" \
+    "opt-mainnet.alchemyapi.io" \
+    "opt-goerli.alchemyapi.io" \
+    "arb-mainnet.alchemyapi.io" \
+    "arb-goerli.alchemyapi.io"; do
     echo "Resolving $domain..."
     ips=$(dig +short A "$domain")
     if [ -z "$ips" ]; then

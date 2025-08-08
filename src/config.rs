@@ -187,6 +187,11 @@ impl Config {
 
     /// Apply environment variable substitutions to configuration
     fn apply_env_vars(&mut self) {
+        // Check for PRIVATE_KEY environment variable
+        if let Ok(_private_key) = std::env::var("PRIVATE_KEY") {
+            tracing::info!("PRIVATE_KEY environment variable found, will be used as default for transactions");
+        }
+
         // Check for ALCHEMY_API_KEY environment variable
         if let Ok(api_key) = std::env::var("ALCHEMY_API_KEY") {
             tracing::info!("Using ALCHEMY_API_KEY environment variable for RPC URLs");
@@ -291,6 +296,7 @@ transport = "stdio"
 buffer_size = 1048576  # 1MB
 
 # Environment variables that can be used:
+# PRIVATE_KEY - Your private key for transaction signing (used as default if not provided in tool calls)
 # ETHERSCAN_API_KEY - Your Etherscan API key for ABI resolution
 # ALCHEMY_API_KEY - Your Alchemy API key (replace YOUR_API_KEY_HERE above)
 # INFURA_API_KEY - Your Infura API key (alternative to Alchemy)
