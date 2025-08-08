@@ -46,7 +46,6 @@ impl ProviderManager {
             .ok_or_else(|| anyhow!("Network '{}' not found", network_name))
     }
 
-    #[allow(dead_code)]
     pub fn get_network_config(&self, network: Option<&str>) -> Result<&NetworkConfig> {
         let network_name = network.unwrap_or(&self.config.default_network);
         self.config

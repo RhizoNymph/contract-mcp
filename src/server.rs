@@ -65,6 +65,18 @@ struct SimulateTransactionRequest {
     network: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+struct SendTransactionRequest {
+    contract_address: String,
+    function_name: String,
+    parameters: Value,
+    private_key: String,
+    value: Option<String>,
+    gas_limit: Option<u64>,
+    gas_price: Option<String>,
+    network: Option<String>,
+}
+
 impl ContractMcpServer {
     pub fn new(config: Config) -> Result<Self> {
         let provider_manager = ProviderManager::new(config.clone())?;
@@ -222,13 +234,51 @@ impl ContractMcpServer {
             }
         }
     }
+
+    #[tool(description = "Send a transaction to execute a contract function")]
+    async fn send_transaction(&self, #[tool(aggr)] request: SendTransactionRequest) -> String {
+        // Check if write operations are allowed
+        if !self.config.security.allow_write_operations {
+            return format!("Error: Write operations are disabled. Use --allow-writes flag to enable transaction sending.");
+        }
+
+        let function_call = FunctionCall {
+            function_name: request.function_name,
+            parameters: request.parameters,
+            from: None, // Will be derived from private key
+            gas_limit: request.gas_limit,
+            gas_price: request.gas_price.clone(),
+            value: request.value,
+        };
+
+        let mut manager = self.contract_manager.lock().await;
+
+        match manager
+            .send_transaction(
+                &request.contract_address,
+                &function_call,
+                &request.private_key,
+                request.gas_limit,
+                request.gas_price.as_deref(),
+                request.network.as_deref(),
+            )
+            .await
+        {
+            Ok(result) => serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|_| "Failed to serialize result".to_string()),
+            Err(e) => {
+                error!("Failed to send transaction: {}", e);
+                format!("Error: {}", e)
+            }
+        }
+    }
 }
 
 #[tool(tool_box)]
 impl ServerHandler for ContractMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("MCP server for interacting with Ethereum smart contracts using Alloy. Supports contract inspection, function calls, gas estimation, event retrieval, and transaction simulation.".into()),
+            instructions: Some("MCP server for interacting with Ethereum smart contracts using Alloy. Supports contract inspection, function calls, gas estimation, event retrieval, transaction simulation, and contract transaction sending.".into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }

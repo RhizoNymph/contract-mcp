@@ -750,4 +750,187 @@ impl ContractManager {
             }
         }
     }
+
+    /// Send a transaction to execute a contract function
+    pub async fn send_transaction(
+        &mut self,
+        contract_address: &str,
+        function_call: &FunctionCall,
+        private_key: &str,
+        gas_limit: Option<u64>,
+        gas_price: Option<&str>,
+        network: Option<&str>,
+    ) -> Result<super::TransactionInfo> {
+        use alloy::{
+            network::{EthereumWallet, TransactionBuilder, ReceiptResponse},
+            signers::local::PrivateKeySigner,
+            providers::ProviderBuilder,
+        };
+
+        // Validate inputs
+        let address = utils::validate_address(contract_address)
+            .map_err(|e| anyhow!("Invalid contract address: {}", e))?;
+
+        utils::validate_function_name(&function_call.function_name)
+            .map_err(|e| anyhow!("Invalid function name: {}", e))?;
+
+        if let Some(net) = network {
+            let available_networks = self.provider_manager.get_available_networks();
+            utils::validate_network(net, &available_networks)
+                .map_err(|e| anyhow!("Network validation failed: {}", e))?;
+        }
+
+        // Parse and validate private key
+        let private_key = private_key.trim();
+        let private_key = if private_key.starts_with("0x") {
+            &private_key[2..]
+        } else {
+            private_key
+        };
+
+        let signer = PrivateKeySigner::from_str(private_key)
+            .map_err(|e| anyhow!("Invalid private key: {}", e))?;
+
+        let from_address = signer.address();
+        tracing::info!("Sending transaction from address: {:?}", from_address);
+
+        // Get the ABI and encode the function call
+        let abi = self
+            .abi_resolver
+            .get_abi(contract_address, network)
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "Could not resolve ABI for transaction: {}",
+                    utils::interpret_abi_error(&e.to_string(), contract_address)
+                )
+            })?;
+
+        let function = abi
+            .functions()
+            .find(|f| f.name == function_call.function_name)
+            .ok_or_else(|| {
+                let available_functions: Vec<String> = abi
+                    .functions()
+                    .map(|f| f.name.clone())
+                    .collect();
+
+                if available_functions.is_empty() {
+                    anyhow!(
+                        "Function '{}' not found. The contract ABI contains no functions.",
+                        function_call.function_name
+                    )
+                } else {
+                    anyhow!(
+                        "Function '{}' not found in contract ABI. Available functions: {}",
+                        function_call.function_name,
+                        available_functions.join(", ")
+                    )
+                }
+            })?;
+
+        // Encode function call parameters
+        let encoded_input = self
+            .encode_function_call(function, &function_call.parameters)
+            .map_err(|e| anyhow!("Failed to encode function call for transaction: {}", e))?;
+
+        // Get provider and create wallet-enabled provider
+        let base_provider = self.provider_manager.get_provider(network)?;
+        let network_config = self.provider_manager.get_network_config(network)?;
+        
+        // Parse the URL for the wallet provider
+        let url = network_config.rpc_url.parse()
+            .map_err(|e| anyhow!("Invalid RPC URL '{}': {}", network_config.rpc_url, e))?;
+
+        // Create wallet and provider for signing
+        let wallet = EthereumWallet::from(signer);
+        let provider = ProviderBuilder::new()
+            .with_recommended_fillers()
+            .wallet(wallet)
+            .on_http(url);
+
+        // Build the transaction request
+        let mut tx_request = provider
+            .transaction_request()
+            .to(address)
+            .input(encoded_input.into());
+
+        // Set value if provided
+        if let Some(value_str) = &function_call.value {
+            let value = utils::validate_hex_value(value_str)
+                .map_err(|e| anyhow!("Invalid transaction value: {}", e))?;
+            tx_request = tx_request.value(value);
+        }
+
+        // Set gas limit
+        if let Some(gas) = gas_limit {
+            tx_request = tx_request.with_gas_limit(gas);
+        } else {
+            // Estimate gas if not provided
+            match base_provider.estimate_gas(&tx_request.clone().from(from_address)).await {
+                Ok(estimated_gas) => {
+                    tx_request = tx_request.with_gas_limit(estimated_gas);
+                }
+                Err(e) => {
+                    tracing::warn!("Gas estimation failed, using default: {}", e);
+                    tx_request = tx_request.with_gas_limit(network_config.gas.default_gas_limit);
+                }
+            }
+        }
+
+        // Set gas price
+        if let Some(gas_price_str) = gas_price {
+            let gas_price = utils::validate_hex_value(gas_price_str)
+                .map_err(|e| anyhow!("Invalid gas price: {}", e))?;
+            tx_request = tx_request.with_gas_price(gas_price.to::<u128>());
+        } else {
+            // Use network's max gas price or get current gas price
+            if let Some(max_gas_price) = network_config.gas.max_gas_price {
+                tx_request = tx_request.with_gas_price(max_gas_price as u128);
+            }
+        }
+
+        tracing::info!("Sending transaction to contract: {:?}", address);
+
+        // Send the transaction
+        match provider.send_transaction(tx_request).await {
+            Ok(pending_tx) => {
+                let tx_hash = *pending_tx.tx_hash();
+                tracing::info!("Transaction sent with hash: {:?}", tx_hash);
+
+                // Wait for confirmation
+                match pending_tx.get_receipt().await {
+                    Ok(receipt) => {
+                        let success = receipt.status();
+                        let gas_used = receipt.gas_used();
+                        
+                        Ok(super::TransactionInfo {
+                            hash: format!("0x{:x}", tx_hash),
+                            from: format!("0x{:x}", from_address),
+                            to: Some(format!("0x{:x}", address)),
+                            value: function_call.value.clone().unwrap_or_else(|| "0".to_string()),
+                            gas_used: gas_used as u64,
+                            gas_price: receipt.effective_gas_price.to_string(),
+                            block_number: receipt.block_number.unwrap_or_default(),
+                            timestamp: 0, // Would need to fetch block info for timestamp
+                            status: success,
+                        })
+                    }
+                    Err(e) => {
+                        Err(anyhow!(
+                            "Transaction was sent but confirmation failed: {}. Transaction hash: 0x{:x}",
+                            e,
+                            tx_hash
+                        ))
+                    }
+                }
+            }
+            Err(e) => {
+                Err(anyhow!(
+                    "Failed to send transaction: {}",
+                    utils::interpret_rpc_error(&e.to_string())
+                ))
+            }
+        }
+    }
 }
