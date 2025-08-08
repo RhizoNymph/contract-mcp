@@ -1,5 +1,7 @@
 # Ethereum Contract MCP Server - Setup Guide
 
+(This was written with claude code as a test for using it for the first time)
+
 This guide will walk you through setting up and testing the Ethereum Contract MCP Server, which provides tools for interacting with Ethereum smart contracts through the Model Context Protocol (MCP).
 
 ## 🚀 Quick Start
@@ -75,6 +77,7 @@ cargo run --release -- --network sepolia
 The server uses TOML configuration with the following sections:
 
 #### Networks Configuration
+
 ```toml
 # Default network when none specified
 default_network = "ethereum"
@@ -91,6 +94,7 @@ priority_fee = 2_000_000_000    # 2 Gwei
 ```
 
 #### Security Settings
+
 ```toml
 [security]
 allow_write_operations = false      # Set to true for transaction sending
@@ -99,6 +103,7 @@ max_transaction_value = "1000000000000000000"  # 1 ETH in wei (optional)
 ```
 
 #### Server Settings
+
 ```toml
 [server]
 transport = "stdio"                 # MCP transport method
@@ -117,6 +122,7 @@ The server recognizes these environment variables:
 - `RUST_LOG`: Set logging level (e.g., `debug`, `info`, `warn`, `error`)
 
 **Note**: When `ALCHEMY_API_KEY` is set, the server automatically:
+
 - Replaces `/demo` URLs with your API key
 - Substitutes `YOUR_API_KEY_HERE` placeholders in config files
 - Logs confirmation that the API key is being used
@@ -138,10 +144,12 @@ RUST_LOG=info cargo run -- --network ethereum
 Once connected to an MCP client, you can test with popular contracts:
 
 **USDC Contract (Ethereum Mainnet)**
+
 - Address: `0xA0b86a33E6417c4dea4a89F56d3c9b3b89Ade32c`
 - Network: `ethereum`
 
 **Test Commands** (through MCP client):
+
 ```json
 {
   "method": "tools/call",
@@ -158,6 +166,7 @@ Once connected to an MCP client, you can test with popular contracts:
 ### 3. Test Function Calls
 
 **Call a view function (balanceOf on USDC):**
+
 ```json
 {
   "method": "tools/call",
@@ -196,26 +205,31 @@ Once connected to an MCP client, you can test with popular contracts:
 The MCP server provides these tools:
 
 ### 1. `get_contract_info`
+
 - **Purpose**: Get contract metadata, ABI, and verification status
 - **Parameters**: `address`, `network` (optional)
 - **Returns**: Contract information including ABI if verified
 
 ### 2. `call_view_function`
+
 - **Purpose**: Call read-only contract functions
 - **Parameters**: `contract_address`, `function_name`, `parameters`, `network` (optional)
 - **Returns**: Function return value(s)
 
 ### 3. `estimate_gas`
+
 - **Purpose**: Estimate gas cost for a transaction
 - **Parameters**: `contract_address`, `function_name`, `parameters`, `from` (optional), `value` (optional), `network` (optional)
 - **Returns**: Estimated gas units
 
 ### 4. `get_contract_events`
+
 - **Purpose**: Retrieve events emitted by a contract
 - **Parameters**: `contract_address`, `from_block` (optional), `to_block` (optional), `network` (optional)
 - **Returns**: Array of events
 
 ### 5. `simulate_transaction`
+
 - **Purpose**: Simulate a transaction without executing it
 - **Parameters**: `contract_address`, `function_name`, `parameters`, `from` (optional), `value` (optional), `network` (optional)
 - **Returns**: Simulation result with success/failure and return data
@@ -225,7 +239,7 @@ The MCP server provides these tools:
 Default configuration includes:
 
 - **Ethereum Mainnet** (`ethereum`)
-- **Sepolia Testnet** (`sepolia`)  
+- **Sepolia Testnet** (`sepolia`)
 - **Polygon** (`polygon`)
 - **Arbitrum** (`arbitrum`)
 
@@ -250,20 +264,24 @@ priority_fee = 1_000_000_000
 ### Common Issues
 
 **1. "Network validation failed"**
+
 - Check that the network name matches your config
 - Use `--network <name>` or update `default_network` in config
 
 **2. "ABI resolution failed"**
+
 - Contract may not be verified on Etherscan
 - Add `ETHERSCAN_API_KEY` environment variable
 - Check that the contract address is correct
 
 **3. "RPC connection failed"**
+
 - Verify your RPC URL is correct and accessible
 - Check if you need API keys for the RPC provider
 - Test network connectivity
 
 **4. "Invalid contract address"**
+
 - Ensure address is 42 characters (0x + 40 hex digits)
 - Check that the address has proper checksumming
 
@@ -320,12 +338,13 @@ Add to your Claude Desktop configuration:
 ### Rate Limiting
 
 - **Etherscan**: 5 calls/second with free API key
-- **Alchemy**: 300 requests/second on free tier  
+- **Alchemy**: 300 requests/second on free tier
 - **Infura**: 100,000 requests/day on free tier
 
 ## 🧪 Example Test Scenarios
 
 ### 1. ERC-20 Token Analysis
+
 ```bash
 # Get USDC contract info
 # Call balanceOf for an address
@@ -334,6 +353,7 @@ Add to your Claude Desktop configuration:
 ```
 
 ### 2. NFT Contract Interaction
+
 ```bash
 # Get contract info for popular NFT (e.g., CryptoPunks)
 # Call tokenURI for a specific token
@@ -342,6 +362,7 @@ Add to your Claude Desktop configuration:
 ```
 
 ### 3. DeFi Protocol Testing
+
 ```bash
 # Interact with Uniswap contracts
 # Check liquidity pool information
