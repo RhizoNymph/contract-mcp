@@ -25,7 +25,16 @@ impl ProviderManager {
     }
 
     fn create_provider(network_config: &NetworkConfig) -> Result<RootProvider<Http<Client>>> {
-        let provider = ProviderBuilder::new().on_http(network_config.rpc_url.parse()?);
+        // Parse the URL
+        let url = network_config
+            .rpc_url
+            .parse()
+            .map_err(|e| anyhow!("Invalid RPC URL '{}': {}", network_config.rpc_url, e))?;
+
+        tracing::debug!("Creating provider for URL: {}", network_config.rpc_url);
+
+        // Create provider with the URL - Alloy will handle HTTP client internally
+        let provider = ProviderBuilder::new().on_http(url);
 
         Ok(provider)
     }
@@ -50,31 +59,36 @@ impl ProviderManager {
     pub fn list_networks(&self) -> Vec<&String> {
         self.config.networks.keys().collect()
     }
-    
+
     pub fn get_available_networks(&self) -> Vec<String> {
         self.config.networks.keys().cloned().collect()
     }
 
     pub async fn check_connection(&self, network: Option<&str>) -> Result<bool> {
-        let provider = self.get_provider(network)
+        let provider = self
+            .get_provider(network)
             .map_err(|e| anyhow!("Failed to get provider for connection check: {}", e))?;
-        
+
         match provider.get_block_number().await {
             Ok(_) => Ok(true),
             Err(e) => {
-                tracing::debug!("Connection check failed for network {}: {}", 
-                    network.unwrap_or("default"), e);
+                tracing::debug!(
+                    "Connection check failed for network {}: {}",
+                    network.unwrap_or("default"),
+                    e
+                );
                 Ok(false)
             }
         }
     }
-    
+
     /// Validates network connectivity with detailed error information
     pub async fn validate_network_connection(&self, network: Option<&str>) -> Result<()> {
         let network_name = network.unwrap_or(&self.config.default_network);
-        let provider = self.get_provider(network)
+        let provider = self
+            .get_provider(network)
             .map_err(|e| anyhow!("Network '{}' is not configured: {}", network_name, e))?;
-        
+
         match provider.get_block_number().await {
             Ok(_) => Ok(()),
             Err(e) => {

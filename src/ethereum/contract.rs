@@ -21,7 +21,7 @@ impl ContractManager {
     pub fn new(provider_manager: ProviderManager) -> Self {
         use crate::ethereum::abi::AbiSource;
         let abi_resolver = AbiResolver::new(AbiSource::default());
-        Self { 
+        Self {
             provider_manager,
             abi_resolver,
         }
@@ -35,7 +35,7 @@ impl ContractManager {
         // Validate the contract address
         let contract_address = utils::validate_address(address)
             .map_err(|e| anyhow!("Invalid contract address: {}", e))?;
-        
+
         // Validate network if provided
         if let Some(net) = network {
             let available_networks: Vec<String> = self.provider_manager.get_available_networks();
@@ -43,12 +43,22 @@ impl ContractManager {
                 .map_err(|e| anyhow!("Network validation failed: {}", e))?;
         }
 
-        let provider = self.provider_manager.get_provider(network)
-            .map_err(|e| anyhow!("Failed to get provider for network '{}': {}", 
-                network.unwrap_or("default"), e))?;
+        let provider = self.provider_manager.get_provider(network).map_err(|e| {
+            anyhow!(
+                "Failed to get provider for network '{}': {}",
+                network.unwrap_or("default"),
+                e
+            )
+        })?;
 
-        let bytecode = provider.get_code_at(contract_address).await
-            .map_err(|e| anyhow!("Failed to fetch contract bytecode: {}", utils::interpret_rpc_error(&e.to_string())))?;
+        tracing::debug!("Fetching bytecode for contract: {:?}", contract_address);
+        let bytecode = provider.get_code_at(contract_address).await.map_err(|e| {
+            tracing::error!("RPC error details: {}", e);
+            anyhow!(
+                "Failed to fetch contract bytecode: {}",
+                utils::interpret_rpc_error(&e.to_string())
+            )
+        })?;
 
         // Check if contract exists (has bytecode)
         if bytecode.is_empty() {
@@ -61,8 +71,8 @@ impl ContractManager {
         // Try to get ABI from Etherscan
         let (abi_value, verified) = match self.abi_resolver.get_abi(address, network).await {
             Ok(abi) => {
-                let abi_value = serde_json::to_value(&abi)
-                    .unwrap_or_else(|_| serde_json::json!([]));
+                let abi_value =
+                    serde_json::to_value(&abi).unwrap_or_else(|_| serde_json::json!([]));
                 (abi_value, true)
             }
             Err(e) => {
@@ -108,7 +118,9 @@ impl ContractManager {
                 .map_err(|e| anyhow!("Network validation failed: {}", e))?;
         }
 
-        let provider = self.provider_manager.get_provider(network)
+        let provider = self
+            .provider_manager
+            .get_provider(network)
             .map_err(|e| anyhow!("Failed to get provider: {}", e))?;
 
         // Get the ABI for the contract
@@ -130,13 +142,14 @@ impl ContractManager {
             .functions()
             .find(|f| f.name == function_call.function_name)
             .ok_or_else(|| {
-                let available_functions: Vec<String> = abi
-                    .functions()
-                    .map(|f| f.name.clone())
-                    .collect();
-                
+                let available_functions: Vec<String> =
+                    abi.functions().map(|f| f.name.clone()).collect();
+
                 if available_functions.is_empty() {
-                    anyhow!("Function '{}' not found. The contract ABI contains no functions.", function_call.function_name)
+                    anyhow!(
+                        "Function '{}' not found. The contract ABI contains no functions.",
+                        function_call.function_name
+                    )
                 } else {
                     anyhow!(
                         "Function '{}' not found in contract ABI. Available functions: {}",
@@ -208,11 +221,12 @@ impl ContractManager {
         let inputs = match parameters {
             Value::Array(params) => {
                 if params.len() != function.inputs.len() {
-                    let expected_params: Vec<String> = function.inputs
+                    let expected_params: Vec<String> = function
+                        .inputs
                         .iter()
                         .map(|input| format!("{} {}", input.ty, input.name))
                         .collect();
-                    
+
                     return Err(anyhow!(
                         "Parameter count mismatch for function '{}': expected {} parameters, got {}.\nExpected parameters: [{}]",
                         function.name,
@@ -226,11 +240,17 @@ impl ContractManager {
                 for (i, param_value) in params.iter().enumerate() {
                     let expected_type = &function.inputs[i].ty;
                     let param_name = &function.inputs[i].name;
-                    let dyn_value = self.json_to_dyn_sol_value(param_value, expected_type)
-                        .map_err(|e| anyhow!(
-                            "Invalid parameter #{} ('{}' of type '{}'): {}",
-                            i + 1, param_name, expected_type, e
-                        ))?;
+                    let dyn_value = self
+                        .json_to_dyn_sol_value(param_value, expected_type)
+                        .map_err(|e| {
+                            anyhow!(
+                                "Invalid parameter #{} ('{}' of type '{}'): {}",
+                                i + 1,
+                                param_name,
+                                expected_type,
+                                e
+                            )
+                        })?;
                     dyn_values.push(dyn_value);
                 }
                 dyn_values
@@ -238,11 +258,12 @@ impl ContractManager {
             Value::Object(obj) => {
                 // Named parameters
                 let mut dyn_values = Vec::new();
-                let expected_params: Vec<String> = function.inputs
+                let expected_params: Vec<String> = function
+                    .inputs
                     .iter()
                     .map(|input| format!("{}: {}", input.name, input.ty))
                     .collect();
-                
+
                 for input in &function.inputs {
                     let param_value = obj
                         .get(&input.name)
@@ -250,17 +271,23 @@ impl ContractManager {
                             "Missing required parameter '{}' of type '{}' for function '{}'.\nExpected parameters: {{{}}}",
                             input.name, input.ty, function.name, expected_params.join(", ")
                         ))?;
-                    let dyn_value = self.json_to_dyn_sol_value(param_value, &input.ty)
-                        .map_err(|e| anyhow!(
-                            "Invalid parameter '{}' of type '{}': {}",
-                            input.name, input.ty, e
-                        ))?;
+                    let dyn_value =
+                        self.json_to_dyn_sol_value(param_value, &input.ty)
+                            .map_err(|e| {
+                                anyhow!(
+                                    "Invalid parameter '{}' of type '{}': {}",
+                                    input.name,
+                                    input.ty,
+                                    e
+                                )
+                            })?;
                     dyn_values.push(dyn_value);
                 }
                 dyn_values
             }
             _ => {
-                let expected_params: Vec<String> = function.inputs
+                let expected_params: Vec<String> = function
+                    .inputs
                     .iter()
                     .map(|input| format!("{}: {}", input.name, input.ty))
                     .collect();
@@ -270,11 +297,12 @@ impl ContractManager {
                     expected_params.join(", "),
                     serde_json::to_string(parameters).unwrap_or_else(|_| "invalid JSON".to_string())
                 ));
-            },
+            }
         };
 
         // Encode the function call
-        let encoded = function.abi_encode_input(&inputs)
+        let encoded = function
+            .abi_encode_input(&inputs)
             .map_err(|e| anyhow!("Failed to encode function inputs: {}", e))?;
 
         Ok(encoded.into())
@@ -302,7 +330,8 @@ impl ContractManager {
     fn json_to_dyn_sol_value(&self, value: &Value, sol_type: &str) -> Result<DynSolValue> {
         match sol_type {
             "address" => {
-                let addr_str = value.as_str()
+                let addr_str = value
+                    .as_str()
                     .ok_or_else(|| anyhow!("Address must be a string"))?;
                 let address = Address::from_str(addr_str)?;
                 Ok(DynSolValue::Address(address))
@@ -316,43 +345,45 @@ impl ContractManager {
                             return Err(anyhow!("Invalid uint value"));
                         }
                     }
-                    Value::String(s) => {
-                        U256::from_str_radix(s.trim_start_matches("0x"), 16)
-                            .or_else(|_| U256::from_str(s))
-                            .map_err(|_| anyhow!("Invalid uint string: {}", s))?
-                    }
+                    Value::String(s) => U256::from_str_radix(s.trim_start_matches("0x"), 16)
+                        .or_else(|_| U256::from_str(s))
+                        .map_err(|_| anyhow!("Invalid uint string: {}", s))?,
                     _ => return Err(anyhow!("Uint must be a number or string")),
                 };
                 Ok(DynSolValue::Uint(num, 256))
             }
             "string" => {
-                let s = value.as_str()
+                let s = value
+                    .as_str()
                     .ok_or_else(|| anyhow!("String parameter must be a string"))?;
                 Ok(DynSolValue::String(s.to_string()))
             }
             "bool" => {
-                let b = value.as_bool()
+                let b = value
+                    .as_bool()
                     .ok_or_else(|| anyhow!("Bool parameter must be a boolean"))?;
                 Ok(DynSolValue::Bool(b))
             }
             ty if ty.starts_with("bytes") && ty != "bytes" => {
                 // Fixed bytes (e.g., bytes32)
-                let hex_str = value.as_str()
+                let hex_str = value
+                    .as_str()
                     .ok_or_else(|| anyhow!("Bytes must be a hex string"))?;
                 let bytes = hex::decode(hex_str.trim_start_matches("0x"))
                     .map_err(|_| anyhow!("Invalid hex string: {}", hex_str))?;
-                
+
                 // Convert to Word (FixedBytes<32>) by padding or truncating
                 let mut word_bytes = [0u8; 32];
                 let len = bytes.len().min(32);
                 word_bytes[..len].copy_from_slice(&bytes[..len]);
                 let word = Word::from(word_bytes);
-                
+
                 Ok(DynSolValue::FixedBytes(word, len))
             }
             "bytes" => {
                 // Dynamic bytes
-                let hex_str = value.as_str()
+                let hex_str = value
+                    .as_str()
                     .ok_or_else(|| anyhow!("Bytes must be a hex string"))?;
                 let bytes = hex::decode(hex_str.trim_start_matches("0x"))
                     .map_err(|_| anyhow!("Invalid hex string: {}", hex_str))?;
@@ -360,7 +391,8 @@ impl ContractManager {
             }
             ty if ty.ends_with("[]") => {
                 // Array type
-                let array = value.as_array()
+                let array = value
+                    .as_array()
                     .ok_or_else(|| anyhow!("Array parameter must be an array"))?;
                 let element_type = &ty[..ty.len() - 2];
                 let mut dyn_array = Vec::new();
@@ -397,7 +429,9 @@ impl ContractManager {
             DynSolValue::Bool(b) => Ok(Value::Bool(*b)),
             DynSolValue::String(s) => Ok(Value::String(s.clone())),
             DynSolValue::Bytes(bytes) => Ok(Value::String(format!("0x{}", hex::encode(bytes)))),
-            DynSolValue::FixedBytes(bytes, _) => Ok(Value::String(format!("0x{}", hex::encode(bytes)))),
+            DynSolValue::FixedBytes(bytes, _) => {
+                Ok(Value::String(format!("0x{}", hex::encode(bytes))))
+            }
             DynSolValue::Array(arr) => {
                 let mut json_arr = Vec::new();
                 for item in arr {
@@ -432,7 +466,9 @@ impl ContractManager {
                 .map_err(|e| anyhow!("Network validation failed: {}", e))?;
         }
 
-        let provider = self.provider_manager.get_provider(network)
+        let provider = self
+            .provider_manager
+            .get_provider(network)
             .map_err(|e| anyhow!("Failed to get provider: {}", e))?;
 
         // If it's a simple ETH transfer (no function call), return base cost
@@ -444,8 +480,16 @@ impl ContractManager {
             .map_err(|e| anyhow!("Invalid function name: {}", e))?;
 
         // Get the ABI and encode the function call
-        let abi = self.abi_resolver.get_abi(contract_address, network).await
-            .map_err(|e| anyhow!("Could not resolve ABI for gas estimation: {}", utils::interpret_abi_error(&e.to_string(), contract_address)))?;
+        let abi = self
+            .abi_resolver
+            .get_abi(contract_address, network)
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "Could not resolve ABI for gas estimation: {}",
+                    utils::interpret_abi_error(&e.to_string(), contract_address)
+                )
+            })?;
 
         let function = abi
             .functions()
@@ -459,7 +503,8 @@ impl ContractManager {
                     function_call.function_name, available_functions.join(", "))
             })?;
 
-        let calldata = self.encode_function_call(function, &function_call.parameters)
+        let calldata = self
+            .encode_function_call(function, &function_call.parameters)
             .map_err(|e| anyhow!("Failed to encode function call for gas estimation: {}", e))?;
 
         // Build transaction request for gas estimation
@@ -482,8 +527,12 @@ impl ContractManager {
         }
 
         // Estimate gas
-        let gas_estimate = provider.estimate_gas(&tx_request).await
-            .map_err(|e| anyhow!("Gas estimation failed: {}", utils::interpret_rpc_error(&e.to_string())))?;
+        let gas_estimate = provider.estimate_gas(&tx_request).await.map_err(|e| {
+            anyhow!(
+                "Gas estimation failed: {}",
+                utils::interpret_rpc_error(&e.to_string())
+            )
+        })?;
 
         Ok(gas_estimate)
     }
@@ -553,7 +602,9 @@ impl ContractManager {
                 .map_err(|e| anyhow!("Network validation failed: {}", e))?;
         }
 
-        let provider = self.provider_manager.get_provider(network)
+        let provider = self
+            .provider_manager
+            .get_provider(network)
             .map_err(|e| anyhow!("Failed to get provider: {}", e))?;
 
         // Get the ABI and encode the function call
@@ -649,7 +700,10 @@ impl ContractManager {
                         "gas_estimation_failed": true,
                         "error": friendly_error
                     })),
-                    error: Some(format!("Gas estimation failed (transaction would likely revert): {}", friendly_error)),
+                    error: Some(format!(
+                        "Gas estimation failed (transaction would likely revert): {}",
+                        friendly_error
+                    )),
                     gas_used: None,
                     transaction_hash: None,
                 });
@@ -660,10 +714,13 @@ impl ContractManager {
         match provider.call(&tx_request).await {
             Ok(result_bytes) => {
                 // Try to decode the result
-                let decoded_result = self.decode_function_result(function, &result_bytes)
-                    .unwrap_or_else(|_| serde_json::json!({
-                        "raw_result": format!("0x{}", hex::encode(&result_bytes))
-                    }));
+                let decoded_result = self
+                    .decode_function_result(function, &result_bytes)
+                    .unwrap_or_else(|_| {
+                        serde_json::json!({
+                            "raw_result": format!("0x{}", hex::encode(&result_bytes))
+                        })
+                    });
 
                 Ok(CallResult {
                     success: true,

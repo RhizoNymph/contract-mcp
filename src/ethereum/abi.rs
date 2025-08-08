@@ -20,7 +20,7 @@ impl Default for AbiSource {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("contract-mcp")
             .join("abi-cache");
-        
+
         Self {
             etherscan_api_key: std::env::var("ETHERSCAN_API_KEY").ok(),
             cache_dir,
@@ -66,12 +66,12 @@ impl AbiResolver {
         // Fetch from Etherscan
         info!("Fetching ABI from Etherscan for {}", address);
         let abi = self.fetch_from_etherscan(&address, network).await?;
-        
+
         // Cache the result
         if let Err(e) = self.cache_abi(&cache_key, &abi).await {
             warn!("Failed to cache ABI for {}: {}", address, e);
         }
-        
+
         self.memory_cache.insert(cache_key, abi.clone());
         Ok(abi)
     }
@@ -110,9 +110,7 @@ impl AbiResolver {
 
         // Check if the response is successful
         if response["status"] != "1" {
-            let message = response["message"]
-                .as_str()
-                .unwrap_or("Unknown error");
+            let message = response["message"].as_str().unwrap_or("Unknown error");
             return Err(anyhow!("Etherscan API error: {}", message));
         }
 
@@ -134,12 +132,13 @@ impl AbiResolver {
     /// Load ABI from disk cache
     async fn load_cached_abi(&self, cache_key: &str) -> Result<JsonAbi> {
         let cache_path = self.config.cache_dir.join(format!("{}.json", cache_key));
-        
+
         if !cache_path.exists() {
             return Err(anyhow!("Cache file does not exist"));
         }
 
-        let content = fs::read_to_string(&cache_path).await
+        let content = fs::read_to_string(&cache_path)
+            .await
             .map_err(|e| anyhow!("Failed to read cache file: {}", e))?;
 
         let abi: JsonAbi = serde_json::from_str(&content)
@@ -152,7 +151,8 @@ impl AbiResolver {
     async fn cache_abi(&self, cache_key: &str, abi: &JsonAbi) -> Result<()> {
         // Create cache directory if it doesn't exist
         if !self.config.cache_dir.exists() {
-            fs::create_dir_all(&self.config.cache_dir).await
+            fs::create_dir_all(&self.config.cache_dir)
+                .await
                 .map_err(|e| anyhow!("Failed to create cache directory: {}", e))?;
         }
 
@@ -160,7 +160,8 @@ impl AbiResolver {
         let content = serde_json::to_string_pretty(abi)
             .map_err(|e| anyhow!("Failed to serialize ABI: {}", e))?;
 
-        fs::write(&cache_path, content).await
+        fs::write(&cache_path, content)
+            .await
             .map_err(|e| anyhow!("Failed to write cache file: {}", e))?;
 
         debug!("Cached ABI to {:?}", cache_path);
@@ -169,15 +170,23 @@ impl AbiResolver {
 
     /// Add ABI manually (for unverified contracts)
     pub fn add_manual_abi(&mut self, address: &str, network: Option<&str>, abi: JsonAbi) {
-        let cache_key = format!("{}_{}", network.unwrap_or("mainnet"), address.to_lowercase());
+        let cache_key = format!(
+            "{}_{}",
+            network.unwrap_or("mainnet"),
+            address.to_lowercase()
+        );
         self.memory_cache.insert(cache_key, abi);
         info!("Added manual ABI for {}", address);
     }
 
     /// Check if we have an ABI for a contract (without fetching)
     pub async fn has_abi(&self, address: &str, network: Option<&str>) -> bool {
-        let cache_key = format!("{}_{}", network.unwrap_or("mainnet"), address.to_lowercase());
-        
+        let cache_key = format!(
+            "{}_{}",
+            network.unwrap_or("mainnet"),
+            address.to_lowercase()
+        );
+
         // Check memory cache
         if self.memory_cache.contains_key(&cache_key) {
             return true;
@@ -191,12 +200,13 @@ impl AbiResolver {
     /// Clear all cached ABIs
     pub async fn clear_cache(&mut self) -> Result<()> {
         self.memory_cache.clear();
-        
+
         if self.config.cache_dir.exists() {
-            fs::remove_dir_all(&self.config.cache_dir).await
+            fs::remove_dir_all(&self.config.cache_dir)
+                .await
                 .map_err(|e| anyhow!("Failed to clear cache directory: {}", e))?;
         }
-        
+
         info!("Cleared ABI cache");
         Ok(())
     }
@@ -229,11 +239,14 @@ mod tests {
 
         let mut resolver = AbiResolver::new(config);
         let test_abi: JsonAbi = serde_json::from_str("[]").unwrap();
-        
+
         resolver.add_manual_abi("0x123", Some("mainnet"), test_abi.clone());
-        
+
         assert!(resolver.has_abi("0x123", Some("mainnet")).await);
         let retrieved_abi = resolver.get_abi("0x123", Some("mainnet")).await.unwrap();
-        assert_eq!(retrieved_abi.functions().count(), test_abi.functions().count());
+        assert_eq!(
+            retrieved_abi.functions().count(),
+            test_abi.functions().count()
+        );
     }
 }

@@ -127,12 +127,13 @@ impl Config {
     /// Load configuration from a TOML file
     pub async fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let content = fs::read_to_string(path).await
+        let content = fs::read_to_string(path)
+            .await
             .map_err(|e| anyhow!("Failed to read config file {:?}: {}", path, e))?;
-        
+
         let config: Config = toml::from_str(&content)
             .map_err(|e| anyhow!("Failed to parse config file {:?}: {}", path, e))?;
-        
+
         Ok(config)
     }
 
@@ -141,38 +142,42 @@ impl Config {
         let path = path.as_ref();
         let content = toml::to_string_pretty(self)
             .map_err(|e| anyhow!("Failed to serialize config: {}", e))?;
-        
+
         // Create parent directory if it doesn't exist
         if let Some(parent) = path.parent() {
             if !parent.exists() {
-                fs::create_dir_all(parent).await
-                    .map_err(|e| anyhow!("Failed to create config directory {:?}: {}", parent, e))?;
+                fs::create_dir_all(parent).await.map_err(|e| {
+                    anyhow!("Failed to create config directory {:?}: {}", parent, e)
+                })?;
             }
         }
-        
-        fs::write(path, content).await
+
+        fs::write(path, content)
+            .await
             .map_err(|e| anyhow!("Failed to write config file {:?}: {}", path, e))?;
-        
+
         Ok(())
     }
 
     /// Load configuration with fallback to default
     pub async fn load_or_default<P: AsRef<Path>>(path: Option<P>) -> Self {
-        match path {
-            Some(path) => {
-                match Self::load_from_file(path).await {
-                    Ok(config) => {
-                        tracing::info!("Loaded configuration from file");
-                        config
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to load config file, using defaults: {}", e);
-                        Self::default()
-                    }
+        let mut config = match path {
+            Some(path) => match Self::load_from_file(path).await {
+                Ok(config) => {
+                    tracing::info!("Loaded configuration from file");
+                    config
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("Failed to load config file, using defaults: {}", e);
+                    Self::default()
+                }
+            },
             None => Self::default(),
-        }
+        };
+
+        // Apply environment variable substitutions
+        config.apply_env_vars();
+        config
     }
 
     /// Add a new network configuration
@@ -180,10 +185,46 @@ impl Config {
         self.networks.insert(name, config);
     }
 
+    /// Apply environment variable substitutions to configuration
+    fn apply_env_vars(&mut self) {
+        // Check for ALCHEMY_API_KEY environment variable
+        if let Ok(api_key) = std::env::var("ALCHEMY_API_KEY") {
+            tracing::info!("Using ALCHEMY_API_KEY environment variable for RPC URLs");
+
+            for (network_name, network_config) in &mut self.networks {
+                // Replace Alchemy demo URLs with actual API key
+                if network_config.rpc_url.contains("alchemy.com/v2/demo") {
+                    network_config.rpc_url = network_config
+                        .rpc_url
+                        .replace("/demo", &format!("/{}", api_key));
+                    tracing::debug!("Updated {} RPC URL with API key", network_name);
+                } else if network_config.rpc_url.contains("YOUR_API_KEY_HERE") {
+                    network_config.rpc_url = network_config
+                        .rpc_url
+                        .replace("YOUR_API_KEY_HERE", &api_key);
+                    tracing::debug!("Updated {} RPC URL with API key", network_name);
+                }
+            }
+        } else {
+            // Warn if using demo endpoints
+            for (network_name, network_config) in &self.networks {
+                if network_config.rpc_url.contains("/demo") {
+                    tracing::warn!("Using demo RPC endpoint for {}, set ALCHEMY_API_KEY environment variable for better reliability", network_name);
+                }
+            }
+        }
+
+        // Check for other environment variables
+        if let Ok(_etherscan_key) = std::env::var("ETHERSCAN_API_KEY") {
+            tracing::debug!("ETHERSCAN_API_KEY found, will be used for ABI resolution");
+            // ABI resolver will pick this up from environment
+        }
+    }
+
     /// Get default config file path
     pub fn default_config_path() -> Result<std::path::PathBuf> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow!("Could not determine config directory"))?;
+        let config_dir =
+            dirs::config_dir().ok_or_else(|| anyhow!("Could not determine config directory"))?;
         Ok(config_dir.join("contract-mcp").join("config.toml"))
     }
 

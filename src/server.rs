@@ -68,7 +68,9 @@ struct SimulateTransactionRequest {
 impl ContractMcpServer {
     pub fn new(config: Config) -> Result<Self> {
         let provider_manager = ProviderManager::new(config.clone())?;
-        let contract_manager = Arc::new(tokio::sync::Mutex::new(ContractManager::new(provider_manager)));
+        let contract_manager = Arc::new(tokio::sync::Mutex::new(ContractManager::new(
+            provider_manager,
+        )));
         let config = Arc::new(config);
 
         Ok(Self {
