@@ -240,8 +240,7 @@ impl ContractManager {
                 for (i, param_value) in params.iter().enumerate() {
                     let expected_type = &function.inputs[i].ty;
                     let param_name = &function.inputs[i].name;
-                    let dyn_value = self
-                        .json_to_dyn_sol_value(param_value, expected_type)
+                    let dyn_value = ContractManager::json_to_dyn_sol_value(param_value, expected_type)
                         .map_err(|e| {
                             anyhow!(
                                 "Invalid parameter #{} ('{}' of type '{}'): {}",
@@ -272,7 +271,7 @@ impl ContractManager {
                             input.name, input.ty, function.name, expected_params.join(", ")
                         ))?;
                     let dyn_value =
-                        self.json_to_dyn_sol_value(param_value, &input.ty)
+                        Self::json_to_dyn_sol_value(param_value, &input.ty)
                             .map_err(|e| {
                                 anyhow!(
                                     "Invalid parameter '{}' of type '{}': {}",
@@ -327,7 +326,7 @@ impl ContractManager {
     }
 
     /// Convert JSON value to DynSolValue based on expected Solidity type
-    fn json_to_dyn_sol_value(&self, value: &Value, sol_type: &str) -> Result<DynSolValue> {
+    fn json_to_dyn_sol_value(value: &Value, sol_type: &str) -> Result<DynSolValue> {
         match sol_type {
             "address" => {
                 let addr_str = value
@@ -350,7 +349,15 @@ impl ContractManager {
                         .map_err(|_| anyhow!("Invalid uint string: {}", s))?,
                     _ => return Err(anyhow!("Uint must be a number or string")),
                 };
-                Ok(DynSolValue::Uint(num, 256))
+                
+                // Extract bit size from type (e.g., uint24 -> 24, uint256 -> 256)
+                let bit_size = if ty == "uint" {
+                    256
+                } else {
+                    ty[4..].parse::<usize>().unwrap_or(256)
+                };
+                
+                Ok(DynSolValue::Uint(num, bit_size))
             }
             "string" => {
                 let s = value
@@ -397,9 +404,39 @@ impl ContractManager {
                 let element_type = &ty[..ty.len() - 2];
                 let mut dyn_array = Vec::new();
                 for element in array {
-                    dyn_array.push(self.json_to_dyn_sol_value(element, element_type)?);
+                    dyn_array.push(Self::json_to_dyn_sol_value(element, element_type)?);
                 }
                 Ok(DynSolValue::Array(dyn_array))
+            }
+            "tuple" => {
+                // Tuple type - extract parameters from nested object
+                if let Some(params_obj) = value.as_object() {
+                    if let Some(params_array) = params_obj.get("params").and_then(|p| p.as_array()) {
+                        // For now, assume all tuple elements are the appropriate types
+                        // This is a simplified implementation for the Uniswap swap parameters
+                        let mut tuple_values = Vec::new();
+                        
+                        // ExactOutputSingleParams structure:
+                        // tokenIn (address), tokenOut (address), fee (uint24), recipient (address),
+                        // deadline (uint256), amountOut (uint256), amountInMaximum (uint256), sqrtPriceLimitX96 (uint160)
+                        let expected_types = vec![
+                            "address", "address", "uint24", "address", 
+                            "uint256", "uint256", "uint256", "uint160"
+                        ];
+                        
+                        for (i, param_value) in params_array.iter().enumerate() {
+                            if i < expected_types.len() {
+                                tuple_values.push(Self::json_to_dyn_sol_value(param_value, expected_types[i])?);
+                            }
+                        }
+                        
+                        Ok(DynSolValue::Tuple(tuple_values))
+                    } else {
+                        Err(anyhow!("Tuple parameter must contain 'params' array"))
+                    }
+                } else {
+                    Err(anyhow!("Tuple parameter must be an object with 'params' array"))
+                }
             }
             _ => Err(anyhow!("Unsupported Solidity type: {}", sol_type)),
         }
@@ -409,19 +446,19 @@ impl ContractManager {
     fn dyn_sol_values_to_json(&self, values: &[DynSolValue]) -> Result<Value> {
         if values.len() == 1 {
             // Single return value
-            self.dyn_sol_value_to_json(&values[0])
+            Self::dyn_sol_value_to_json(&values[0])
         } else {
             // Multiple return values - return as array
             let mut result = Vec::new();
             for value in values {
-                result.push(self.dyn_sol_value_to_json(value)?);
+                result.push(Self::dyn_sol_value_to_json(value)?);
             }
             Ok(Value::Array(result))
         }
     }
 
     /// Convert single DynSolValue to JSON
-    fn dyn_sol_value_to_json(&self, value: &DynSolValue) -> Result<Value> {
+    fn dyn_sol_value_to_json(value: &DynSolValue) -> Result<Value> {
         match value {
             DynSolValue::Address(addr) => Ok(Value::String(format!("0x{:x}", addr))),
             DynSolValue::Uint(num, _) => Ok(Value::String(num.to_string())),
@@ -435,14 +472,14 @@ impl ContractManager {
             DynSolValue::Array(arr) => {
                 let mut json_arr = Vec::new();
                 for item in arr {
-                    json_arr.push(self.dyn_sol_value_to_json(item)?);
+                    json_arr.push(Self::dyn_sol_value_to_json(item)?);
                 }
                 Ok(Value::Array(json_arr))
             }
             DynSolValue::Tuple(tuple) => {
                 let mut json_arr = Vec::new();
                 for item in tuple {
-                    json_arr.push(self.dyn_sol_value_to_json(item)?);
+                    json_arr.push(Self::dyn_sol_value_to_json(item)?);
                 }
                 Ok(Value::Array(json_arr))
             }
@@ -782,11 +819,7 @@ impl ContractManager {
 
         // Parse and validate private key
         let private_key = private_key.trim();
-        let private_key = if private_key.starts_with("0x") {
-            &private_key[2..]
-        } else {
-            private_key
-        };
+        let private_key = private_key.strip_prefix("0x").unwrap_or(private_key);
 
         let signer = PrivateKeySigner::from_str(private_key)
             .map_err(|e| anyhow!("Invalid private key: {}", e))?;

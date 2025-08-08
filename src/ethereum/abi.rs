@@ -169,6 +169,7 @@ impl AbiResolver {
     }
 
     /// Add ABI manually (for unverified contracts)
+    #[allow(dead_code)]
     pub fn add_manual_abi(&mut self, address: &str, network: Option<&str>, abi: JsonAbi) {
         let cache_key = format!(
             "{}_{}",
@@ -180,6 +181,7 @@ impl AbiResolver {
     }
 
     /// Check if we have an ABI for a contract (without fetching)
+    #[allow(dead_code)]
     pub async fn has_abi(&self, address: &str, network: Option<&str>) -> bool {
         let cache_key = format!(
             "{}_{}",
@@ -198,6 +200,7 @@ impl AbiResolver {
     }
 
     /// Clear all cached ABIs
+    #[allow(dead_code)]
     pub async fn clear_cache(&mut self) -> Result<()> {
         self.memory_cache.clear();
 

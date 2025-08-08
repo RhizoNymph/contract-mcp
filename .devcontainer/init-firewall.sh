@@ -93,15 +93,15 @@ for domain in \
     "etherscan.io" \
     "api.etherscan.io" \
     "alchemy.com" \
-    "eth-mainnet.alchemyapi.io" \
-    "eth-goerli.alchemyapi.io" \
-    "eth-sepolia.alchemyapi.io" \
-    "polygon-mainnet.alchemyapi.io" \
-    "polygon-mumbai.alchemyapi.io" \
-    "opt-mainnet.alchemyapi.io" \
-    "opt-goerli.alchemyapi.io" \
-    "arb-mainnet.alchemyapi.io" \
-    "arb-goerli.alchemyapi.io"; do
+    "eth-mainnet.g.alchemy.com" \
+    "eth-goerli.g.alchemy.com" \
+    "eth-sepolia.g.alchemy.com" \
+    "polygon-mainnet.g.alchemy.com" \
+    "polygon-mumbai.g.alchemy.com" \
+    "opt-mainnet.g.alchemy.com" \
+    "opt-goerli.g.alchemy.com" \
+    "arb-mainnet.g.alchemy.com" \
+    "arb-goerli.g.alchemy.com"; do
     echo "Resolving $domain..."
     ips=$(dig +short A "$domain")
     if [ -z "$ips" ]; then

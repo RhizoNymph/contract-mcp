@@ -239,7 +239,7 @@ impl ContractMcpServer {
     async fn send_transaction(&self, #[tool(aggr)] request: SendTransactionRequest) -> String {
         // Check if write operations are allowed
         if !self.config.security.allow_write_operations {
-            return format!("Error: Write operations are disabled. Use --allow-writes flag to enable transaction sending.");
+            return "Error: Write operations are disabled. Use --allow-writes flag to enable transaction sending.".to_string();
         }
 
         // Determine private key: use from request if provided, otherwise check environment variable
@@ -255,7 +255,7 @@ impl ContractMcpServer {
                         env_key
                     }
                     Err(_) => {
-                        return format!("Error: No private key provided. Either include 'private_key' in the request or set PRIVATE_KEY environment variable.");
+                        return "Error: No private key provided. Either include 'private_key' in the request or set PRIVATE_KEY environment variable.".to_string();
                     }
                 }
             }

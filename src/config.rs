@@ -138,6 +138,7 @@ impl Config {
     }
 
     /// Save configuration to a TOML file
+    #[allow(dead_code)]
     pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let path = path.as_ref();
         let content = toml::to_string_pretty(self)
@@ -181,6 +182,7 @@ impl Config {
     }
 
     /// Add a new network configuration
+    #[allow(dead_code)]
     pub fn add_network(&mut self, name: String, config: NetworkConfig) {
         self.networks.insert(name, config);
     }

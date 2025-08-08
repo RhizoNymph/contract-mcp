@@ -63,6 +63,7 @@ impl ProviderManager {
         self.config.networks.keys().cloned().collect()
     }
 
+    #[allow(dead_code)]
     pub async fn check_connection(&self, network: Option<&str>) -> Result<bool> {
         let provider = self
             .get_provider(network)
@@ -82,6 +83,7 @@ impl ProviderManager {
     }
 
     /// Validates network connectivity with detailed error information
+    #[allow(dead_code)]
     pub async fn validate_network_connection(&self, network: Option<&str>) -> Result<()> {
         let network_name = network.unwrap_or(&self.config.default_network);
         let provider = self
